@@ -1,10 +1,11 @@
-﻿using NUnit.Framework.Legacy;
+using NUnit.Framework.Legacy;
 using System.Collections;
 using System.Reflection;
 using Moq;
 using AdaptiveSort;
 using ILGPU.Runtime;
 using ILGPU;
+using System.Linq;
 
 namespace AdaptiveSortTests
 {
@@ -72,11 +73,11 @@ namespace AdaptiveSortTests
         public void AdaptiveSort_Hashtable_SortsElements()
         {
             Hashtable table = new Hashtable
-    {
-        { 3, "three" },
-        { 1, "one" },
-        { 2, "two" }
-    };
+            {
+                { 3, "three" },
+                { 1, "one" },
+                { 2, "two" }
+            };
             table.AdaptiveSort();
 
             // Hashtable does not guarantee ordering when enumerating keys.
@@ -87,8 +88,7 @@ namespace AdaptiveSortTests
             CollectionAssert.AreEqual(new int[] { 1, 2, 3 }, keys);
         }
 
-
-        // Optionally, you can test MergeInPlace indirectly via Timsort:
+        // Indirect test of the Timsort path through AdaptiveSort.
         [Test]
         public void Timsort_SortsCorrectly_ForUnsortedData()
         {
@@ -101,34 +101,45 @@ namespace AdaptiveSortTests
     [TestFixture]
     public class GpuSortExtensionsTests
     {
-        // Use reflection to access the static s_accelerators field.
-        private static Accelerator[] GetCachedAccelerators()
+        private static bool HasCudaGpu()
         {
-            FieldInfo field = typeof(GpuSortExtensions).GetField("s_accelerators", BindingFlags.NonPublic | BindingFlags.Static);
-            return (Accelerator[])field.GetValue(null);
+            try
+            {
+                using var context = Context.Create(builder => builder.Cuda());
+                foreach (var device in context.Devices)
+                {
+                    if (device.AcceleratorType == AcceleratorType.Cuda)
+                        return true;
+                }
+                return false;
+            }
+            catch
+            {
+                // If ILGPU cannot create a CUDA context at all, treat as no GPU.
+                return false;
+            }
         }
 
         [Test]
         public void AdaptiveGpuSort_NoGPUs_ThrowsException()
         {
-            // If GPUs are available, skip this test.
-            Accelerator[] accelerators = GetCachedAccelerators();
-            if (accelerators.Length > 0)
+            if (HasCudaGpu())
             {
-                Assert.Ignore("GPUs are available; skipping test for no GPU scenario.");
+                Assert.Ignore("CUDA GPUs are available; skipping no-GPU scenario test.");
             }
 
             int[] array = new int[] { 5, 3, 1 };
-            Assert.Throws<Exception>(() => array.AdaptiveGpuSort());
+
+            // New implementation throws InvalidOperationException when no GPUs.
+            Assert.Throws<InvalidOperationException>(() => array.AdaptiveGpuSort());
         }
 
         [Test]
         public void AdaptiveGpuSort_SortsCorrectly()
         {
-            Accelerator[] accelerators = GetCachedAccelerators();
-            if (accelerators.Length == 0)
+            if (!HasCudaGpu())
             {
-                Assert.Ignore("No GPUs available; skipping GPU sort test.");
+                Assert.Ignore("No CUDA GPUs available; skipping GPU sort test.");
             }
 
             int[] array = new int[] { 20, 3, 15, 7, 2, 9, 12, 5 };
@@ -157,24 +168,25 @@ namespace AdaptiveSortTests
         [Test]
         public void ExclusiveScanKernel_ComputesCorrectPrefix()
         {
+            if (!HasCudaGpu())
+            {
+                Assert.Ignore("No CUDA GPUs available; skipping exclusive scan test.");
+            }
+
             // Prepare a histogram array.
             int[] histogram = new int[] { 3, 1, 4, 0, 2 };
             int[] expectedPrefix = new int[] { 0, 3, 4, 8, 8 };
 
-            // Allocate a dummy accelerator if needed.
-            Accelerator[] accelerators = GetCachedAccelerators();
-            if (accelerators.Length == 0)
-            {
-                Assert.Ignore("No GPUs available; skipping exclusive scan test.");
-            }
-            Accelerator accelerator = accelerators[0];
+            using var context = Context.Create(builder => builder.Cuda());
+            var device = context.Devices.First(d => d.AcceleratorType == AcceleratorType.Cuda);
+            using var accelerator = device.CreateAccelerator(context);
 
             using var histBuffer = accelerator.Allocate1D<int, Stride1D.Dense>(histogram.Length, default(Stride1D.Dense));
             using var prefixBuffer = accelerator.Allocate1D<int, Stride1D.Dense>(histogram.Length, default(Stride1D.Dense));
             histBuffer.CopyFromCPU(histogram);
 
+            // Use an equivalent exclusive scan kernel to the production implementation.
             var exclusiveScanKernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
-            // Use the same kernel as in production.
                 (Index1D index, ArrayView<int> hist, ArrayView<int> pref) =>
                 {
                     if (index == 0)
@@ -187,6 +199,7 @@ namespace AdaptiveSortTests
                         }
                     }
                 });
+
             exclusiveScanKernel(1, histBuffer.View, prefixBuffer.View);
             accelerator.Synchronize();
 
@@ -194,5 +207,4 @@ namespace AdaptiveSortTests
             CollectionAssert.AreEqual(expectedPrefix, actualPrefix);
         }
     }
-
 }
