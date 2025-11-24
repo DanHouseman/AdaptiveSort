@@ -134,97 +134,73 @@ namespace AdaptiveSort
 
         // --------- Core Timsort over Span<T> ---------
 
-        private static void Timsort<T>(Span<T> span)
-            where T : IComparable<T>
+private static void Timsort<T>(Span<T> span)
+    where T : IComparable<T>
+{
+    int n = span.Length;
+    if (n <= 1)
+        return;
+
+    // One reusable temporary buffer per sort.
+    T[] temp = new T[n];
+
+    // 1. Sort small runs with insertion sort.
+    for (int i = 0; i < n; i += INSERTION_SORT_THRESHOLD)
+    {
+        int right = Math.Min(i + INSERTION_SORT_THRESHOLD - 1, n - 1);
+        InsertionSort(span, i, right);
+    }
+
+    // 2. Bottom-up merge.
+    for (int size = INSERTION_SORT_THRESHOLD; size < n; size <<= 1)
+    {
+        for (int left = 0; left < n - 1; left += (size << 1))
         {
-            int n = span.Length;
-            if (n <= 1)
-                return;
+            int mid = left + size - 1;
+            if (mid >= n - 1)
+                break;
 
-            // One reusable temporary buffer per sort. We only ever use
-            // the first leftSize elements when merging.
-            T[] temp = new T[n];
-
-            // 1. Sort small runs with insertion sort.
-            for (int i = 0; i < n; i += INSERTION_SORT_THRESHOLD)
-            {
-                int right = Math.Min(i + INSERTION_SORT_THRESHOLD - 1, n - 1);
-                InsertionSort(span, i, right);
-            }
-
-            // 2. Bottom-up merge.
-            for (int size = INSERTION_SORT_THRESHOLD; size < n; size <<= 1)
-            {
-                for (int left = 0; left < n - 1; left += (size << 1))
-                {
-                    int mid = left + size - 1;
-                    if (mid >= n - 1)
-                        break;
-
-                    int right = Math.Min(left + (size << 1) - 1, n - 1);
-                    MergeRuns(span, left, mid, right, temp);
-                }
-            }
+            int right = Math.Min(left + (size << 1) - 1, n - 1);
+            MergeRuns(span, left, mid, right, temp);
         }
+    }
+}
 
-        // Merge [left..mid] and [mid+1..right] within span, using temp as reusable buffer.
-        private static void MergeRuns<T>(Span<T> span, int left, int mid, int right, T[] temp)
-            where T : IComparable<T>
+private static void MergeRuns<T>(Span<T> span, int left, int mid, int right, T[] temp)
+    where T : IComparable<T>
+{
+    int leftSize = mid - left + 1;
+    if (leftSize <= 0)
+        return;
+
+    // Reuse the shared temp buffer; we only touch the first leftSize elements.
+    Span<T> leftSpan = temp.AsSpan(0, leftSize);
+
+    // Copy left run into leftSpan.
+    for (int i = 0; i < leftSize; i++)
+        leftSpan[i] = span[left + i];
+
+    int iLeft = 0;
+    int iRight = mid + 1;
+    int k = left;
+
+    while (iLeft < leftSize && iRight <= right)
+    {
+        if (leftSpan[iLeft].CompareTo(span[iRight]) <= 0)
         {
-            int leftSize = mid - left + 1;
-            if (leftSize <= 0)
-                return;
-
-            Span<T> leftSpan;
-
-            // Blittable fast-path: stackalloc small left sides by bytes.
-            if (TypeTraits<T>.IsBlittable)
-            {
-                int elementSize = Unsafe.SizeOf<T>();
-                int totalBytes = leftSize * elementSize;
-
-                if (totalBytes <= STACKALLOC_BYTES_THRESHOLD)
-                {
-                    Span<byte> buffer = stackalloc byte[totalBytes];
-                    leftSpan = MemoryMarshal.Cast<byte, T>(buffer);
-                }
-                else
-                {
-                    leftSpan = temp.AsSpan(0, leftSize);
-                }
-            }
-            else
-            {
-                leftSpan = temp.AsSpan(0, leftSize);
-            }
-
-            // Copy left run into leftSpan.
-            for (int i = 0; i < leftSize; i++)
-                leftSpan[i] = span[left + i];
-
-            int iLeft = 0;
-            int iRight = mid + 1;
-            int k = left;
-
-            while (iLeft < leftSize && iRight <= right)
-            {
-                // Compare leftSpan[iLeft] with span[iRight].
-                if (leftSpan[iLeft].CompareTo(span[iRight]) <= 0)
-                {
-                    span[k++] = leftSpan[iLeft++];
-                }
-                else
-                {
-                    span[k++] = span[iRight++];
-                }
-            }
-
-            // Copy remaining left elements.
-            while (iLeft < leftSize)
-            {
-                span[k++] = leftSpan[iLeft++];
-            }
+            span[k++] = leftSpan[iLeft++];
         }
+        else
+        {
+            span[k++] = span[iRight++];
+        }
+    }
+
+    while (iLeft < leftSize)
+    {
+        span[k++] = leftSpan[iLeft++];
+    }
+}
 
         // --------- Insertion sort over Span<T> ---------
 
